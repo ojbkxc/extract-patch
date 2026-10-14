@@ -30,7 +30,7 @@ except Exception:
 
 SRC = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(SRC)
-FONT_KAITI = os.path.join(PARENT, '核定-原', 'STKAITI.TTF')   # 楷体：大写金额
+FONT_KAITI = os.path.join(SRC, 'STKAITI.TTF')                # 楷体：大写金额
 FONT_HEI = r'C:\Windows\Fonts\simhei.ttf'                     # 黑体：数字金额
 XLSX = os.path.join(SRC, 'jpg.xlsx')
 

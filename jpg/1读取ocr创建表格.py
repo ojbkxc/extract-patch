@@ -107,10 +107,10 @@ def get_rapid_engine():
     if _rapid_engine is not None:
         return _rapid_engine
     try:
-        from rapidocr_onnxruntime import RapidOCR
+        from rapidocr import RapidOCR
     except ImportError:
-        die('缺少 rapidocr-onnxruntime，请安装：\n'
-            '  pip install rapidocr-onnxruntime==1.4.4 "onnxruntime==1.20.1" "opencv-python==4.10.0.84"')
+        die('缺少 rapidocr，请安装：\n'
+            '  pip install rapidocr "onnxruntime==1.20.1" "opencv-python==4.10.0.84"')
     _rapid_engine = RapidOCR()
     return _rapid_engine
 
@@ -118,15 +118,15 @@ def get_rapid_engine():
 def ocr_image(img_path, warns):
     eng = get_rapid_engine()
     try:
-        result, elapse = eng(img_path)
+        out = eng(img_path)
     except Exception as e:
         warns.append('%s：OCR 识别异常 %s' % (os.path.basename(img_path), str(e)[:80]))
         return {}
-    if not result:
+    if out is None or not out.txts:
         warns.append('%s：OCR 无结果' % os.path.basename(img_path))
         return {}
 
-    texts = [item[1] for item in result]
+    texts = list(out.txts)
     all_text = '\n'.join(texts)
     _title_frags = ('中华', '和国', '税收', '证', '明')
     has_title = sum(1 for k in _title_frags if k in all_text) >= 3
@@ -180,6 +180,59 @@ def extract_rows(jpg_dir, warns, verbose):
             warns.append('%s：未识别到标题「%s」，OCR 可能失败' % (f, TITLE_KEYWORD))
         rows.append(dict(file=f, **info))
     return rows
+
+
+def num_to_chinese(num):
+    """数字转人民币中文大写，返回去掉开头'人'的字符串。
+    例: 4341.7 -> '民币肆仟叁佰肆拾壹圆柒角整'
+    下游 2换所有金额.py 会自动补'人'，故此处去'人'避免重复。
+    """
+    digits = '零壹贰叁肆伍陆柒捌玖'
+    n = int(round(num * 100))
+    integer_part = n // 100
+    fen = n % 100
+    jiao = fen // 10
+    fen_unit = fen % 10
+
+    if integer_part == 0:
+        int_str = '零'
+    else:
+        groups = []
+        t = integer_part
+        while t > 0:
+            groups.append(t % 10000)
+            t //= 10000
+        big = ['', '万', '亿', '万亿']
+        int_str = ''
+        for gi in range(len(groups) - 1, -1, -1):
+            g = groups[gi]
+            if g == 0:
+                continue
+            s = ''
+            for i in range(3, -1, -1):
+                d = g // (10 ** i) % 10
+                if d == 0:
+                    if s and not s.endswith('零'):
+                        s += '零'
+                else:
+                    s += digits[d] + ['', '拾', '佰', '仟'][i]
+            s = s.rstrip('零')
+            int_str += s + big[gi]
+        int_str = int_str.rstrip('零')
+
+    result = '人民币' + int_str + '圆'
+    if jiao == 0 and fen_unit == 0:
+        result += '整'
+    else:
+        if jiao == 0:
+            result += '零'
+        else:
+            result += digits[jiao] + '角'
+        if fen_unit == 0:
+            result += '整'
+        else:
+            result += digits[fen_unit] + '分'
+    return result[1:]
 
 
 def read_q3(path):
@@ -268,6 +321,21 @@ def build(jpg_dir, q3_path, out_path, verbose):
             dst = sh.cell(i + 2, 6 + j)
             dst.value = src.value
             copy_style(src, dst)
+    # 补齐 H/I/J 列：大写金额与数字金额均取自汇总表 N 列（所得税）
+    for i, row in enumerate(rows):
+        if row['src_r'] is None:
+            continue
+        r = i + 2
+        amt = q3_ws.cell(row['src_r'], 14).value  # N 列 = 所得税
+        if amt is None:
+            continue
+        amt_f = float(amt)
+        if sh.cell(r, 9).value is None:    # I 列 金额1
+            sh.cell(r, 9).value = amt_f
+        if sh.cell(r, 10).value is None:   # J 列 金额2
+            sh.cell(r, 10).value = amt_f
+        if sh.cell(r, 8).value is None:    # H 列 中文大写（去'人'）
+            sh.cell(r, 8).value = num_to_chinese(amt_f)
     for i, row in enumerate(rows):
         r = i + 2
         if row['src_r'] is not None:
