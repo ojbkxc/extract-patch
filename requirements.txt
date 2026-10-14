@@ -1,0 +1,38 @@
+# extract-patch 依赖清单
+# 目标环境：Python 3.13（Windows）
+#
+# 安装：
+#   py -3.13 -m pip install -r requirements.txt
+#
+# ！绝对不要升级 onnxruntime —— 1.24 及以上的新版本在部分机器上 import 即崩溃
+#   (0xC0000005)。装别的库时请带上 --upgrade-strategy only-if-needed。
+
+# ---------- 表格读写（全部脚本） ----------
+openpyxl==3.1.5
+
+# ---------- PDF 处理 ----------
+pymupdf==1.28.2
+fonttools==4.66.1
+
+# ---------- 图片 / 二维码 ----------
+pillow==12.3.0
+zxing-cpp==3.1.1
+qrcode==8.2            # 生成二维码需 pillow
+
+# ---------- OCR（jpg/1读取ocr创建表格.py） ----------
+rapidocr==3.10.0
+onnxruntime==1.20.1    # ！钉死，见文件头警告
+numpy==2.5.4           # 以下两项由 rapidocr 间接引入，此处固定为已验证版本
+opencv-python-headless==5.0.0.93
+
+# ---------- 使用须知 ----------
+# 1. 本文件按 Python 3.13 编写，OCR 用的是新版 rapidocr 包。
+#    但 jpg/1读取ocr创建表格.py 目前仍写着旧包：
+#        from rapidocr_onnxruntime import RapidOCR
+#    该旧包在 PyPI 上限定 Requires-Python <3.13，在 3.13 上装不上。
+#    要用这份依赖，需把该脚本迁移到新包（改 3 行，详见 README）。
+#    旧包同时还在用老版 PP-OCR 模型，新包是 PP-OCRv6，生僻字精度更高。
+# 2. 若改用 Python 3.11 / 3.12，把上面 OCR 那组替换为：
+#        rapidocr-onnxruntime==1.4.4
+#        opencv-python==4.10.0.84
+#    （去掉 numpy / opencv-python-headless 两行）其余保持不变。
