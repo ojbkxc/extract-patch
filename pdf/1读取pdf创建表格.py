@@ -20,6 +20,8 @@
     3. 法人姓名：按税号从 --q3 表 B/C 列匹配
     4. N/Q/R/S/T 五列：按 (企业名称, 税号) 匹配 --q3 表，写入值并完整复制格式
        （字体/填充/边框/对齐/数字格式/列宽），落在 F~J 列
+       F 列=所得税；H 列改写为 F 值换算出的中文大写金额（'民币…'，供 pdf/4
+       替换大写金额.py 使用）；I/J 列=金额1/金额2，取同一金额
     5. 二维码第 5 段（金额）改写为 F 列（所得税）值，保留两位小数
     6. 票号后三位随机重排，每位数字取自二维码中票号之前出现过的数字；
        若票号前的字段里没有任何数字（如区划码为 null），回退为票号自身前 15 位
@@ -83,6 +85,85 @@ def copy_style(src, dst):
     dst.alignment = copy(src.alignment)
     dst.protection = copy(src.protection)
     dst.number_format = src.number_format
+
+
+CN_NUM = '零壹贰叁肆伍陆柒捌玖'
+CN_UNIT = ('', '拾', '佰', '仟')
+CN_SECTION = ('', '万', '亿', '万亿')
+
+
+def _section_to_cn(section):
+    """0~9999 的整数 -> 中文数字（不含万/亿量词）。"""
+    s = ''
+    pos = 0
+    zero = False
+    while section > 0:
+        d = section % 10
+        if d == 0:
+            if s:
+                zero = True
+        else:
+            if zero:
+                s = CN_NUM[0] + s
+                zero = False
+            s = CN_NUM[d] + CN_UNIT[pos] + s
+        section //= 10
+        pos += 1
+    return s
+
+
+def _int_to_cn(num):
+    """非负整数 -> 中文大写数字（含万/亿量词）。"""
+    if num == 0:
+        return CN_NUM[0]
+    result = ''
+    pos = 0
+    while num > 0:
+        section = num % 10000
+        if section == 0:
+            if result and not result.startswith(CN_NUM[0]):
+                result = CN_NUM[0] + result
+        else:
+            if result and section < 1000 and not result.startswith(CN_NUM[0]):
+                result = CN_NUM[0] + result
+            result = _section_to_cn(section) + CN_SECTION[pos] + result
+        num //= 10000
+        pos += 1
+    return result
+
+
+def rmb_upper(amount):
+    """数字金额 -> '民币' + 中文大写（元/角/分，财务用字）。
+
+    例：4379.43 -> '民币肆仟叁佰柒拾玖元肆角叁分'；2970 -> '民币贰仟玖佰柒拾元整'。
+    刻意不带开头的'人'：下游 pdf/4替换大写金额.py（补'（大写）人'）与
+    jpg/2换所有金额.py（补'人'）都会自行在前面加上'人'。非数字返回 None。
+    """
+    if amount is None:
+        return None
+    try:
+        val = round(float(amount) + 1e-9, 2)
+    except (TypeError, ValueError):
+        return None
+    neg = val < 0
+    val = abs(val)
+    integer = int(val)
+    frac = int(round((val - integer) * 100))
+    jiao, fen = divmod(frac, 10)
+
+    if integer == 0 and frac == 0:
+        body = '零元整'
+    else:
+        body = (_int_to_cn(integer) + '元') if integer > 0 else ''
+        if frac == 0:
+            body += '整'
+        elif jiao == 0:
+            body += CN_NUM[0] + CN_NUM[fen] + '分'
+        else:
+            body += CN_NUM[jiao] + '角'
+            if fen:
+                body += CN_NUM[fen] + '分'
+    return ('负' if neg else '') + '民币' + body
 
 
 def find_q3(pdf_dir, explicit):
@@ -234,6 +315,19 @@ def build(pdf_dir, q3_path, out_path, seed, verbose):
             dst = sh.cell(i + 2, 6 + j)
             dst.value = src.value
             copy_style(src, dst)
+
+    # H 列(第 8 列)「中文金额」= F 列(所得税) 数值换算出的中文大写（民币…）；
+    # I/J 列(第 9/10 列)「金额1/金额2」取同一金额，与 jpg 侧表结构对齐。
+    sh.cell(1, 8).value = '中文金额'
+    for i, row in enumerate(rows):
+        if row['src_r'] is None:
+            continue
+        r = i + 2
+        fval = sh.cell(r, 6).value
+        if isinstance(fval, (int, float)):
+            sh.cell(r, 8).value = rmb_upper(fval)
+            sh.cell(r, 9).value = fval
+            sh.cell(r, 10).value = fval
     for i, row in enumerate(rows):
         r = i + 2
         if row['src_r'] is not None:
