@@ -264,14 +264,43 @@ def process_image(img_path, info, out_path):
     draw_left(img, f_ch, ch_text, bi_start, ch_cy)
     print(f'  中文大写: 保留"{full[:keep]}" 从"{ch_text}"开始 起笔={bi_start} 原墨迹={ch}')
 
-    # 3) ¥ 数字（黑体）：¥ 沿用原件自带字形（不重画），只把 ¥ 之后的数字右对齐替换
+    # 3) ¥ 数字：先右对齐画数字，再把原图提取的 ¥ 贴到数字左侧（¥ 跟数字走）
     dn = r['dn']
+    yn = r['yn']
+    yen_end = r['yen_end']
     yn_text = format_amount(info['amt2'])
     dn_cy = (dn[1] + dn[3]) / 2.0
-    erase(draw, (dn[0] - 1, dn[1] - 1, dn[2] + 1, dn[3] + 1), r['dn_clip'])
     f_yn = ImageFont.truetype(FONT_HEI, FONT_SIZE_NUM)
+
+    # 精准定位 ¥ 本体边界：用阈值 150 找第一组连续墨迹列（不含数字残影）
+    y_top = min(yn[1], dn[1]) - 3
+    y_bot = max(yn[3], dn[3]) + 4
+    yen_crop = img.crop((yn[0], y_top, yen_end + 1, y_bot))
+    yen_arr = np.array(yen_crop)
+    ink_cols = np.where((yen_arr.max(axis=2) < INK_TH).any(axis=0))[0]
+    yen_left = ink_cols[0]
+    yen_right = ink_cols[0]
+    for c in ink_cols[1:]:
+        if c - yen_right > 1:
+            break
+        yen_right = c
+    yen_w = yen_right - yen_left + 1
+
+    # 提取 ¥ 像素（含抗锯齿，阈值 250 掩码）
+    yen_crop = yen_crop.crop((yen_left, 0, yen_right + 1, yen_crop.height))
+    yen_mask = Image.fromarray((yen_arr[:, yen_left:yen_right + 1].max(axis=2) < 250).astype(np.uint8) * 255)
+
+    # 擦除整个 ¥+数字 区域
+    full_clip = (yn[0] - 8, r['dn_clip'][1], r['dn_clip'][2], r['dn_clip'][3])
+    erase(draw, (yn[0] - 8, y_top, dn[2] + 4, y_bot), full_clip)
+
+    # 画数字（右对齐到原数字右边界）
     num_left = draw_right(img, f_yn, yn_text, dn[2], dn_cy)
-    print(f'  ¥数字:   "¥{yn_text}" ¥保留原件 右边界={dn[2]} 数字左边界={num_left} 原数字墨迹={dn}')
+
+    # 把 ¥ 贴到数字左侧，紧贴（原图中 ¥-数字间距仅 1-2px）
+    yen_x = max(0, num_left - yen_w - 1)
+    img.paste(yen_crop, (yen_x, y_top), yen_mask)
+    print(f'  ¥数字:   "¥{yn_text}" ¥贴x={yen_x} 数字左边界={num_left}')
 
     # 校验：重新测量新图三处墨迹，与原图对比（中文窗口避开左侧"(大写)"与底线）
     out = np.array(img)
