@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import random
 import re
 import sys
 from copy import copy
@@ -145,6 +146,12 @@ def ocr_image(img_path, warns):
     m_no = re.search(r'No\.?\s*[:：]?\s*(\d{15,20})', all_text)
     voucher_no = m_no.group(1) if m_no else None
 
+    orig_voucher_no = None
+    all_nums = re.findall(r'\d{18}', all_text)
+    candidates = [n for n in all_nums if n != voucher_no and n != taxpayer_id]
+    if candidates:
+        orig_voucher_no = candidates[0]
+
     m_amt = re.search(r'[¥￥]\s*([\d,]+\.?\d*)', all_text)
     amount = m_amt.group(1).replace(',', '') if m_amt else None
 
@@ -159,8 +166,24 @@ def ocr_image(img_path, warns):
             break
 
     return dict(has_title=has_title, taxpayer_name=taxpayer_name,
-                taxpayer_id=taxpayer_id, voucher_no=voucher_no, amount=amount,
+                taxpayer_id=taxpayer_id, voucher_no=voucher_no,
+                orig_voucher_no=orig_voucher_no, amount=amount,
                 _texts=texts)
+
+
+def reshuffle_tail3(old, tax_no, seed):
+    """换后三位 —— pool 从号码自身前 N-3 位的数字获取（JPG 无二维码解析）。
+    返回 (新号, 是否变更)"""
+    if not old or len(old) <= 3:
+        return old, False
+    pool = sorted({ch for ch in old[:-3] if ch.isdigit()})
+    if not pool:
+        return old, False
+    rng = random.Random('%s|%s|%s' % (seed, tax_no, old))
+    cands = [a + b + c for a in pool for b in pool for c in pool if a + b + c != old[-3:]]
+    if not cands:
+        return old, False
+    return old[:-3] + rng.choice(cands), True
 
 
 def extract_rows(jpg_dir, warns, verbose):
@@ -248,7 +271,7 @@ def read_q3(path):
     return ws, by_key, by_idcard
 
 
-def build(jpg_dir, q3_path, out_path, verbose):
+def build(jpg_dir, q3_path, out_path, seed, verbose):
     warns = []
     rows = extract_rows(jpg_dir, warns, verbose)
     q3_ws, by_key, by_idcard = read_q3(q3_path)
@@ -349,7 +372,43 @@ def build(jpg_dir, q3_path, out_path, verbose):
         sh.cell(r, 11).value = None
     for col, w in COL_WIDTHS.items():
         sh.column_dimensions[col].width = w
+    sh.column_dimensions['L'].width = 28.0
+    sh.column_dimensions['M'].width = 28.0
     sh.freeze_panes = 'A2'
+
+    for col_idx, label in ((12, '票号'), (13, '原凭证号')):
+        c = sh.cell(1, col_idx)
+        c.value = label
+        c.font = Font(name=FONT_NAME, size=11, bold=True, color='FFFFFF')
+        c.fill = PatternFill('solid', fgColor=FILL_HEADER)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.border = BORDER
+
+    for i, row in enumerate(rows):
+        r = i + 2
+        ticket = row.get('voucher_no')
+        orig = row.get('orig_voucher_no')
+        tax_no = row.get('taxpayer_id')
+        if not tax_no and row.get('src_r') is not None:
+            tax_no = q3_ws.cell(row['src_r'], 3).value
+
+        new_ticket, ticket_changed = reshuffle_tail3(ticket, tax_no, seed)
+        new_orig, orig_changed = reshuffle_tail3(orig, tax_no, seed)
+
+        for col_idx, val in ((12, new_ticket), (13, new_orig)):
+            c = sh.cell(r, col_idx)
+            c.value = val
+            c.font = Font(name=FONT_NAME, size=11)
+            c.fill = PatternFill('solid', fgColor=FILL_ODD if i % 2 == 0 else FILL_EVEN)
+            c.border = BORDER
+            c.alignment = Alignment(horizontal='left', vertical='center')
+            c.number_format = '@'
+
+        if verbose:
+            print('  第 %d 行 票号 %s -> %s  原凭证号 %s -> %s'
+                  % (i + 1,
+                     ticket or '?', new_ticket or '?',
+                     orig or '?', new_orig or '?'))
 
     tmp = out_path + '.tmp'
     try:
@@ -378,6 +437,7 @@ def main():
     ap.add_argument('--jpg-dir', default=None, help='存放 JPG 的目录（默认脚本所在目录）')
     ap.add_argument('--q3', default=None, help='季度汇总表 xlsx（默认自动查找 *季度*.xlsx）')
     ap.add_argument('--out', default=None, help='输出文件（默认 <jpg-dir>/jpg.xlsx）')
+    ap.add_argument('--seed', type=int, default=20261013, help='票号/原凭证号随机种子，默认 20261013')
     ap.add_argument('-v', '--verbose', action='store_true', help='打印 OCR 详细结果')
     a = ap.parse_args()
 
@@ -386,7 +446,7 @@ def main():
         die('目录不存在: %s' % jpg_dir)
     q3 = find_q3(jpg_dir, a.q3)
     out = os.path.abspath(a.out or os.path.join(jpg_dir, 'jpg.xlsx'))
-    build(jpg_dir, q3, out, a.verbose)
+    build(jpg_dir, q3, out, a.seed, a.verbose)
 
 
 if __name__ == '__main__':
