@@ -57,7 +57,7 @@ def find_qr_xref(doc):
         pix = fitz.Pixmap(doc, xref)
         w, h = pix.width, pix.height
         pix = None
-        if w == h and 30 <= w <= 200:
+        if w == h and 30 <= w <= 500:
             stream = doc.xref_stream(xref)
             candidates.append((xref, w, h, len(stream)))
     if not candidates:
@@ -72,6 +72,28 @@ def get_tax_id(doc):
     m = re.search(r"纳税人识别号[:\s]*([A-Z0-9]{15,20})", text)
     if m:
         return m.group(1).strip()
+    page = doc[0]
+    seq = []
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                seq.append(span)
+    label = None
+    for s in seq:
+        if s["text"].strip() == "纳税人识别号":
+            label = s
+            break
+    if not label:
+        return None
+    lx1 = label["bbox"][2]
+    ly = label["origin"][1]
+    for s in seq:
+        if s["origin"][0] > lx1 and abs(s["origin"][1] - ly) < 20:
+            m2 = re.search(r"([0-9A-Za-z]{15,20})", s["text"])
+            if m2:
+                return m2.group(1).upper()
     return None
 
 

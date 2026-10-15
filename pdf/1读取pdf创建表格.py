@@ -49,6 +49,8 @@ from openpyxl.utils import get_column_letter
 
 HEADERS = ['序号', '企业名称', '税号', '法人 姓名', '二维码的值']
 Q3_SRC_COLS = (14, 17, 18, 19, 20)          # N Q R S T  ->  F G H I J
+Q3_JIYI_COL = 9                              # q3 合计金额列
+JIYI_COL = 13                                # M 列：计税依据（= q3 合计金额，供 7换计税依据.py）
 COL_WIDTHS = {'A': 8.0, 'B': 42.0, 'C': 24.0, 'D': 12.0, 'E': 60.0}
 HEADER_H, DATA_H = 32.4, 28.8
 FILL_HEADER, FILL_ODD, FILL_EVEN = '1F4E79', 'FFFFFF', 'F7F9FC'
@@ -182,6 +184,69 @@ def find_q3(pdf_dir, explicit):
     die('找到多个候选汇总表，请用 --q3 指定其一：\n  ' + '\n  '.join(hits))
 
 
+def extract_name_from_spans(page):
+    """从 span 级别提取'纳税人名称'右侧的企业名称（按位置匹配，不依赖 span 顺序）。"""
+    return _extract_right_of_label(page, '纳税人名称')
+
+
+def extract_tid_from_spans(page):
+    """从 span 级别提取'纳税人识别号'右侧的税号（按位置+格式匹配）。"""
+    seq = []
+    for block in page.get_text('dict')['blocks']:
+        if block['type'] != 0:
+            continue
+        for line in block['lines']:
+            for span in line['spans']:
+                seq.append(span)
+    label = None
+    for s in seq:
+        if s['text'].strip() == '纳税人识别号':
+            label = s
+            break
+    if not label:
+        return None
+    lx1 = label['bbox'][2]
+    ly = label['origin'][1]
+    for s in seq:
+        if s['origin'][0] > lx1 and abs(s['origin'][1] - ly) < 20:
+            m = re.search(r'([0-9A-Za-z]{15,20})', s['text'])
+            if m:
+                return m.group(1).upper()
+    return None
+
+
+def _extract_right_of_label(page, label_text):
+    """通用：按位置提取标签右侧的文本（不依赖 span 顺序）。"""
+    seq = []
+    for block in page.get_text('dict')['blocks']:
+        if block['type'] != 0:
+            continue
+        for line in block['lines']:
+            for span in line['spans']:
+                seq.append(span)
+    label = None
+    for s in seq:
+        if s['text'].strip() == label_text:
+            label = s
+            break
+    if not label:
+        return None
+    lx1 = label['bbox'][2]
+    ly = label['origin'][1]
+    candidates = []
+    for s in seq:
+        if s['origin'][0] > lx1 and abs(s['origin'][1] - ly) < 20:
+            candidates.append((s['origin'][1], s['origin'][0], s['text']))
+    if not candidates:
+        return None
+    candidates.sort()
+    full = ''.join(t for _, _, t in candidates).strip()
+    cuts = [x for x in (full.find('（'), full.find('(')) if x > 0]
+    if cuts:
+        full = full[:min(cuts)]
+    return full
+
+
 def extract_rows(pdf_dir, warns):
     fitz = load_fitz()
     try:
@@ -207,13 +272,14 @@ def extract_rows(pdf_dir, warns):
         if not qr:
             die('%s 未能识别到二维码，已终止（不产生输出文件）' % f)
 
-        pdf_name = None
-        m = re.search(r'纳税人名称\s*[:：]?\s*([^\n]+)', text)
-        if m:
-            pdf_name = m.group(1).strip()
-            cuts = [x for x in (pdf_name.find('（'), pdf_name.find('(')) if x > 0]
-            if cuts:
-                pdf_name = pdf_name[:min(cuts)]
+        pdf_name = extract_name_from_spans(doc[0])
+        if not pdf_name:
+            m = re.search(r'纳税人名称\s*[:：]?\s*([^\n]+)', text)
+            if m:
+                pdf_name = m.group(1).strip()
+                cuts = [x for x in (pdf_name.find('（'), pdf_name.find('(')) if x > 0]
+                if cuts:
+                    pdf_name = pdf_name[:min(cuts)]
         stem = re.sub(r'^\s*\d+\s*[.、,，]?\s*', '', os.path.splitext(f)[0]).strip()
         name = pdf_name or stem
         if pdf_name and stem and pdf_name != stem:
@@ -223,8 +289,10 @@ def extract_rows(pdf_dir, warns):
                 warns.append('%s：PDF 名称「%s」与文件名「%s」不一致，采用 PDF 名称'
                              % (f, pdf_name, stem))
 
-        m = re.search(r'纳税人识别号\s*[:：]?\s*([0-9A-Za-z]{15,20})', text)
-        tid = m.group(1).upper() if m else None
+        tid = extract_tid_from_spans(doc[0])
+        if not tid:
+            m = re.search(r'纳税人识别号\s*[:：]?\s*([0-9A-Za-z]{15,20})', text)
+            tid = m.group(1).upper() if m else None
         m = re.search(r'No[^\d\n]{0,4}(\d{15,25})', text)
         ticket = m.group(1) if m else None
         m = re.search(r'[¥￥]\s*([\d,]+\.\d{2})', text)
@@ -339,6 +407,24 @@ def build(pdf_dir, q3_path, out_path, seed, verbose):
             kc.border = BORDER
             kc.alignment = Alignment(horizontal='center', vertical='center')
         sh.cell(r, 11).value = None
+    # M 列(第13列)「计税依据」= q3 合计金额(第9列)，供 7换计税依据.py 读取替换
+    mh = sh.cell(1, JIYI_COL)
+    mh.value = '计税依据'
+    mh.font = Font(name=FONT_NAME, size=11, bold=True, color='FFFFFF')
+    mh.fill = PatternFill('solid', fgColor=FILL_HEADER)
+    mh.alignment = Alignment(horizontal='center', vertical='center')
+    mh.border = BORDER
+    for i, row in enumerate(rows):
+        r = i + 2
+        c = sh.cell(r, JIYI_COL)
+        if row['src_r'] is not None:
+            c.value = q3_ws.cell(row['src_r'], Q3_JIYI_COL).value
+            copy_style(q3_ws.cell(row['src_r'], Q3_SRC_COLS[0]), c)
+        else:
+            c.font = Font(name=FONT_NAME, size=11)
+            c.fill = PatternFill('solid', fgColor=FILL_ODD if i % 2 == 0 else FILL_EVEN)
+            c.border = BORDER
+            c.alignment = Alignment(horizontal='center', vertical='center')
     for col, w in COL_WIDTHS.items():
         sh.column_dimensions[col].width = w
     sh.freeze_panes = 'A2'

@@ -51,6 +51,29 @@ def get_pdf_info(doc):
     cur_no = m.group(1) if m else None
     m2 = re.search(r"纳税人识别号\s*\n?\s*([0-9A-Za-z]+)", text)
     tax_no = m2.group(1) if m2 else None
+    if not tax_no:
+        page = doc[0]
+        seq = []
+        for block in page.get_text("dict")["blocks"]:
+            if block["type"] != 0:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    seq.append(span)
+        label = None
+        for s in seq:
+            if s["text"].strip() == "纳税人识别号":
+                label = s
+                break
+        if label:
+            lx1 = label["bbox"][2]
+            ly = label["origin"][1]
+            for s in seq:
+                if s["origin"][0] > lx1 and abs(s["origin"][1] - ly) < 20:
+                    m3 = re.search(r"([0-9A-Za-z]{15,20})", s["text"])
+                    if m3:
+                        tax_no = m3.group(1).upper()
+                        break
     return cur_no, tax_no
 
 
