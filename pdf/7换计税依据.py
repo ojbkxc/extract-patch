@@ -40,6 +40,33 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 XLSX_NAME = "pdf.xlsx"
 DONE_NAME = "已完成"
 M_COL = 13  # M 列（合计金额）
+FONT_PATH = os.path.join(BASE, "金额.ttf")
+FONT_NAME = "AmtFont"  # 与 5替换两个数字金额.py 一致，便于复用已嵌入字体
+
+
+def measure_height(fontfile, fontsize, text="0"):
+    """测量金额.ttf 在给定字号下的实际渲染高度"""
+    tmp = fitz.open()
+    p = tmp.new_page()
+    p.insert_text(point=(0, 50), text=text, fontname="F",
+                  fontfile=fontfile, fontsize=fontsize)
+    d = p.get_text("dict")
+    for block in d["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                return span["bbox"][3] - span["bbox"][1]
+    return fontsize
+
+
+def calc_size(orig_span, fontfile):
+    """缩放补偿：金额.ttf 与原字体 unitsPerEm 不同，同字号渲染高度不同"""
+    orig_h = orig_span["bbox"][3] - orig_span["bbox"][1]
+    new_h = measure_height(fontfile, orig_span["size"])
+    if new_h > 0:
+        return orig_span["size"] * (orig_h / new_h)
+    return orig_span["size"]
 
 
 def get_jiyi_num(text):
@@ -130,6 +157,55 @@ def replace_in_pdf(doc, old_num, new_num):
     return changed
 
 
+def find_jiyi_span(page, old_num):
+    """定位"计税依据："后面数字的 span（bbox/origin/size）"""
+    d = page.get_text("dict")
+    spans = []
+    for block in d["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                spans.append(span)
+    if not spans:
+        return None
+    label_y = None
+    for s in spans:
+        if "计税依据" in s["text"]:
+            label_y = s["origin"][1]
+            break
+    candidates = [s for s in spans if s["text"].strip() == old_num]
+    if not candidates:
+        return None
+    if label_y is not None:
+        candidates.sort(key=lambda s: abs(s["origin"][1] - label_y))
+    return candidates[0]
+
+
+def replace_jiyi_with_font(doc, old_num, new_num):
+    """用金额.ttf 擦除原计税依据数字并右对齐写入新数字。
+    若 PDF 已嵌入 AmtFont 则复用，否则完整嵌入金额.ttf（不 subset_fonts）。
+    """
+    page = doc[0]
+    span = find_jiyi_span(page, old_num)
+    if not span:
+        return False
+    fontsize = calc_size(span, FONT_PATH)
+    font = fitz.Font(fontfile=FONT_PATH)
+    rect = fitz.Rect(span["bbox"])
+    page.add_redact_annot(rect, fill=(1, 1, 1))
+    page.apply_redactions()
+    w = font.text_length(new_num, fontsize=fontsize)
+    x = span["bbox"][2] - w
+    y = span["origin"][1]
+    page.insert_text(
+        point=(x, y), text=new_num,
+        fontname=FONT_NAME, fontfile=FONT_PATH,
+        fontsize=fontsize, color=(0, 0, 0),
+    )
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description='替换 PDF 计税依据数字为 pdf.xlsx M 列值')
     ap.add_argument('-v', '--verbose', action='store_true', help='打印每行变更明细')
@@ -205,9 +281,9 @@ def main():
             doc.close()
             continue
 
-        # 替换 PDF 内容流中的计税依据数字
+        # 用金额.ttf 替换计税依据数字（已嵌入则复用，未嵌入则完整嵌入）
         try:
-            pdf_changed = replace_in_pdf(doc, old_num, new_num)
+            pdf_changed = replace_jiyi_with_font(doc, old_num, new_num)
         except Exception as e:
             print("[失败] %s: PDF 改写异常 %s" % (name, e))
             fail += 1
@@ -215,12 +291,12 @@ def main():
             continue
 
         if not pdf_changed:
-            print("[失败] %s: PDF 内容流未找到计税依据数字 %s" % (name, old_num))
+            print("[失败] %s: 未定位到计税依据数字 %s" % (name, old_num))
             fail += 1
             doc.close()
             continue
 
-        doc.save(dst, garbage=4, deflate=True)
+        doc.save(dst, garbage=4, deflate=True, deflate_fonts=True)
         doc.close()
         ok += 1
         if a.verbose:

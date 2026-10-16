@@ -232,7 +232,7 @@ def main():
             doc.close()
             continue
 
-        doc.subset_fonts()
+
         doc.save(dst, garbage=4, deflate=True, deflate_fonts=True)
         doc.close()
         print("[完成] %s: %.2f" % (name, amount_val))
